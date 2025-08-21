@@ -1,0 +1,43 @@
+name: Extract albion.zip into repo
+on:
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install unzip
+        run: sudo apt-get update && sudo apt-get install -y unzip
+
+      - name: Unzip plugin
+        run: |
+          rm -rf extracted albion
+          mkdir -p extracted
+          unzip -o albion.zip -d extracted
+
+      - name: Clean compiled artifacts
+        run: |
+          find extracted -type d -name "__pycache__" -prune -exec rm -rf {} + || true
+          find extracted -type f -name "*.pyc" -delete || true
+
+      - name: Move into repo root
+        run: |
+          if [ -d extracted/albion ]; then
+            mv extracted/albion ./albion
+          else
+            mkdir -p albion
+            shopt -s dotglob
+            mv extracted/* ./albion/ || true
+          fi
+
+      - name: Commit files
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Extract albion.zip and add plugin sources"
+          add_options: '-A'
+          commit_user_name: github-actions[bot]
+          commit_user_email: 41898282+github-actions[bot]@users.noreply.github.com
+          branch: main
