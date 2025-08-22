@@ -1,7 +1,5 @@
-name: Unzip Albion.zip
+name: Unzip Albion
 
-# Este flujo de trabajo se ejecuta cuando se hace un 'push' (subida)
-# que incluye el archivo 'albion.zip'
 on:
   push:
     paths:
@@ -9,22 +7,20 @@ on:
 
 jobs:
   unzip:
-    # Se ejecutará en un servidor virtual de Ubuntu
+    permissions:      # <--- AÑADE ESTA LÍNEA
+      contents: write # <--- Y ESTA LÍNEA
     runs-on: ubuntu-latest
     steps:
-      # 1. Clona tu repositorio en el servidor virtual
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4 # Actualizado a v4, la más reciente
 
-      # 2. Descomprime el archivo y luego lo elimina
       - name: Unzip albion.zip
         run: |
           unzip -o albion.zip -d ./
           rm albion.zip
 
-      # 3. Guarda los archivos extraídos en tu repositorio
       - name: Commit and Push changes
-        uses: stefanzweifel/git-auto-commit-action@v5
+        uses: stefanzweifel/git-auto-commit-action@v4
         with:
-          commit_message: 'Descomprimido albion.zip'
-          branch: main # Asegúrate de que esta es tu rama principal (puede ser 'master')
+          commit_message: 'Descomprimido el archivo albion.zip'
+          branch: main
