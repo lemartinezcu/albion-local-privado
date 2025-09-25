@@ -2,8 +2,8 @@
 -- Nodes/Cells from hole -> Used to create raster
 -------------------------------------------------------------------------------
 
-ALTER TABLE _albion.metadata ADD COLUMN xspacing real default 5 NOT NULL;
-ALTER TABLE _albion.metadata ADD COLUMN yspacing real default 5 NOT NULL;
+ALTER TABLE IF EXISTS _albion.metadata ADD COLUMN IF NOT EXISTS xspacing real;
+ALTER TABLE IF EXISTS _albion.metadata ADD COLUMN IF NOT EXISTS yspacing real;
 
 CREATE OR REPLACE FUNCTION st_interpolate_from_tin (LOCATION geometry, tin geometry)
     RETURNS geometry
@@ -112,6 +112,9 @@ $BODY$
 LANGUAGE plpgsql
 ;
 
+-- Parche idempotente: deja el camino libre para recrear la MV
+DROP MATERIALIZED VIEW IF EXISTS _albion.hole_nodes CASCADE;
+
 CREATE MATERIALIZED VIEW _albion.hole_nodes AS (
     WITH nodes AS (
         SELECT
@@ -179,6 +182,9 @@ END;
 $BODY$
 LANGUAGE plpgsql
 ;
+
+-- Parche idempotente: deja el camino libre para recrear la MV
+DROP MATERIALIZED VIEW IF EXISTS _albion.cells CASCADE;
 
 CREATE MATERIALIZED VIEW _albion.cells AS (
     WITH c AS (

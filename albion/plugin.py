@@ -404,8 +404,7 @@ class Plugin(QObject):
         if layers:
             layers[0].editingStopped.connect(self.__update_section_list)
 
-        # We make sure that corresponding extents are valid when the project
-        # is loaded
+        # Aseguramos extents válidos al cargar
         cell = QgsProject.instance().mapLayersByName("cell")
         if cell:
             cell[0].updateExtents()
@@ -414,6 +413,17 @@ class Plugin(QObject):
         if section_geom:
             section_geom[0].updateExtents()
 
+        # Recalcular/Actualizar secciones al abrir proyecto
+        try:
+            self.project.create_sections()
+        except Exception:
+            # No bloqueamos la carga por errores de refresco
+            pass
+
+        # Refrescar capas visibles de sección
+        self.__refresh_layers("section.anchor")
+        self.__refresh_layers("section.geom")
+        
     def __update_section_list(self):
         self.__current_section.clear()
         self.__current_section.addItems(self.project.sections())

@@ -318,150 +318,93 @@ class Project(object):
         self.vacuum()
 
     def update(self):
-        """
-        Upgrade reducido:
-        - Reinstala formation_section_edit (obligatorio)
-        - Reinstala bulk-from-polygon (opcional) desde updates/_formation_from_polygon.sql
-          usando el SRID actual de albion.metadata.
-        - Aplica updates/_section_rotation.sql (obligatorio) para exponer section_rotation_deg.
-        - Idempotente: omite silenciosamente objetos ya existentes (constraints, triggers, etc.).
-        """
-        # Intentar importar utilidades del plugin; si falla, fallback local.
-        try:
-            from .utils import get_statements, DIRECTORY_PATH
-        except Exception:
-            # Fallback mínimo
-            from pathlib import Path
-            import re
-            DIRECTORY_PATH = Path(__file__).parent
-
-            def get_statements(sql_path):
-                """
-                Divide un archivo SQL en sentencias; respeta bloques $$ ... $$.
-                """
-                text = sql_path.read_text(encoding="utf-8")
-                statements = []
-                buff = []
-                in_dollar = False
-                dollar_tag = None
-                for line in text.splitlines():
-                    m = re.findall(r"(\$[A-Za-z0-9_]*\$)", line)
-                    # Si hay más de un marcador en la línea, alternan entrada/salida.
-                    for tag in m:
-                        if not in_dollar:
-                            in_dollar = True
-                            dollar_tag = tag
-                        elif tag == dollar_tag:
-                            in_dollar = False
-                            dollar_tag = None
-                    buff.append(line)
-                    if (not in_dollar) and line.rstrip().endswith(";"):
-                        stmt = "\n".join(buff).strip()
-                        if stmt:
-                            statements.append(stmt)
-                        buff = []
-                tail = "\n".join(buff).strip()
-                if tail:
-                    statements.append(tail)
-                return statements
-
-        # Archivos SQL a ejecutar: (nombre, es_obligatorio)
-        sql_files = [
-            ("_formation_section_edit.sql", True),   # requerido
-            ("_formation_from_polygon.sql", False),  # opcional
-            ("_section_rotation.sql", True),         # requerido (metadata.section_rotation_deg)
-        ]
-
-        # Códigos SQLSTATE a ignorar por idempotencia
-        DUPLICATE_SQLSTATES = {
-            "42710",  # duplicate_object (constraints, triggers, etc.)
-            "42P06",  # duplicate_schema
-            "42P07",  # duplicate_table / index name
-            "42701",  # duplicate_column
-            "42723",  # duplicate_function
-            "42P03",  # duplicate_cursor
-            "42P04",  # duplicate_database
-        }
-        UNDEFINED_SQLSTATES = {
-            # Para DROP sin IF EXISTS u otros objetos faltantes: se omiten si aparecen
-            "42704",  # undefined_object (constraint/trigger)
-            "42P01",  # undefined_table
-            "42703",  # undefined_column
-            "42883",  # undefined_function
-            "3F000",  # undefined_schema
-        }
-
-        def _is_ignorable_sql_error(err) -> bool:
-            # Compatibilidad amplia: por código o por mensaje
-            pgcode = getattr(err, "pgcode", None)
-            if pgcode in DUPLICATE_SQLSTATES or pgcode in UNDEFINED_SQLSTATES:
-                return True
-            msg = str(err).lower()
-            return (
-                "already exists" in msg
-                or "ya existe" in msg
-                or "does not exist" in msg
-                or "no existe" in msg
-            )
+        """reload schema albion without changing data"""
 
         with self.connect() as con:
             cur = con.cursor()
 
-            # Obtener SRID real
             cur.execute("SELECT srid FROM albion.metadata")
-            row = cur.fetchone()
-            if not row:
-                raise RuntimeError("No se pudo obtener SRID desde albion.metadata.")
-            (srid,) = row
+            (srid,) = cur.fetchone()
+            # test if version number is in metadata
+            cur.execute(
+                """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'metadata' AND column_name='version'
+                """
+            )
+            if cur.fetchone():
+                # here goes future upgrades
+                cur.execute("SELECT version FROM _albion.metadata")
+                ver = cur.fetchone()[0]
+                if ver == "2.0":
+                    if self.__has_cell():
+                        sql_path = DIRECTORY_PATH / "albion_db" / "albion_raster.sql"
+                        for statement in get_statements(sql_path):
+                            cur.execute(statement)
 
-            print(f"[Albion] Reinicializando objetos SQL con SRID={srid}")
+                    sql_path = DIRECTORY_PATH / "updates" / "_update_edge_detection.sql"
+                    for statement in get_statements(sql_path):
+                        cur.execute(statement)
 
-            # Ejecutar cada archivo SQL
-            for fname, required in sql_files:
-                sql_path = DIRECTORY_PATH / "updates" / fname
-                if not sql_path.exists():
-                    if required:
-                        raise RuntimeError(f"No se encontró el archivo SQL: {sql_path}")
-                    else:
-                        print(f"[Albion] Aviso: se omite {fname} (no existe).")
-                        continue
+                if ver == "2.3":
+                    sql_path = DIRECTORY_PATH / "updates" / "elementary_volumes_2.3-2.4.sql"
+                    with sql_path.open() as f:
+                        cur.execute(f.read())
 
-                print(f"[Albion] Ejecutando {fname} ...")
-                statements = get_statements(sql_path)
-                total = len(statements)
-                for i, st in enumerate(statements, start=1):
-                    st_exec = st.replace("$SRID", str(srid))  # inocuo si no hay $SRID
-                    # Ejecutar con SAVEPOINT para no perder sentencias previas del mismo archivo
-                    cur.execute("SAVEPOINT albion_update_sp")
-                    try:
-                        cur.execute(st_exec)
-                        cur.execute("RELEASE SAVEPOINT albion_update_sp")
-                    except Exception as e:
-                        # Volver al savepoint y decidir si se ignora
-                        cur.execute("ROLLBACK TO SAVEPOINT albion_update_sp")
-                        if _is_ignorable_sql_error(e):
-                            print(
-                                f"[Albion] Omitiendo sentencia {i}/{total} de {fname} (idempotente): "
-                                f"{type(e).__name__}: {e}"
+                    sql_path = DIRECTORY_PATH / "updates" / "_albion_v2.3-v2.4.sql"
+                    for statement in get_statements(sql_path):
+                        cur.execute(statement.replace("$SRID", str(srid)))
+
+                if ver == "2.4":
+                    sql_path = DIRECTORY_PATH / "updates" / "elementary_volumes_2.4-2.5.sql"
+                    with sql_path.open() as f:
+                        cur.execute(f.read().replace("$SRID", str(srid)))
+
+                    sql_path = DIRECTORY_PATH / "updates" / "_albion_v2.4-v2.5.sql"
+                    for statement in get_statements(sql_path):
+                        cur.execute(statement.replace("$SRID", str(srid)))
+                        
+                    sql_path = DIRECTORY_PATH / "updates" / "_formation_section_edit.sql"
+                    for statement in get_statements(sql_path):
+                        cur.execute(statement.replace("$SRID", str(srid)))
+
+                cur.execute("UPDATE _albion.metadata SET version = '2.5'")
+                con.commit()
+
+            else:
+                cur.execute("drop schema if exists albion cascade")
+                # old albion version, we upgrade the data
+                sql_path = DIRECTORY_PATH / "updates" / "_albion_v1_to_v2.sql"
+                for statement in get_statements(sql_path):
+                    cur.execute(statement.replace("$SRID", str(srid)))
+
+                pathname = DIRECTORY_PATH / "elementary_volume" / "__init__.py"
+                with pathname.open() as f:
+                    include_elementary_volume = f.read()
+
+                for sql_file in ("albion_collar.sql", "albion.sql"):
+                    sql_path = DIRECTORY_PATH / "albion_db" / sql_file
+                    for statement in get_statements(sql_path):
+                        cur.execute(
+                            statement.replace("$SRID", str(srid)).replace(
+                                "$INCLUDE_ELEMENTARY_VOLUME", include_elementary_volume
                             )
-                            # Continuamos con la siguiente sentencia sin abortar
-                            continue
-                        # Error real: abortamos
-                        raise RuntimeError(
-                            f"Error ejecutando {fname} sentencia {i}/{total}:\n{st}\nDetalle: {e}"
-                        ) from e
+                        )
 
-            con.commit()
+                con.commit()
 
-        # Vacuum opcional
-        try:
-            self.vacuum()
-        except Exception as e:
-            print(f"[Albion] Aviso: vacuum falló (no crítico): {e}")
+                cur.execute("SELECT name, fields_definition FROM albion.layer")
+                tables = [
+                    {"NAME": r[0], "FIELDS_DEFINITION": r[1]} for r in cur.fetchall()
+                ]
 
-        print("[Albion] Objetos SQL reinstalados correctamente.")
-        return
-        
+                for table in tables:
+                    table["SRID"] = str(srid)
+                    self.add_table(table, view_only=True)
+
+                self.vacuum()
+
     def export_sections_obj(self, graph_id, filename):
         with self.connect() as con:
             cur = con.cursor()
@@ -763,127 +706,7 @@ class Project(object):
                 cur.execute("REFRESH MATERIALIZED VIEW _albion.cells")
             con.commit()
 
-    def recenter_default_sections(self):
-        """
-        Reposiciona anchors WE/SN con:
-          - Centro C del bbox 2D de albion.collar
-          - Longitudes: Lx = f*Distx, Ly = f*Disty con f=1.5 (o 2.0 si max(Distx/Disty, Disty/Distx) > 2)
-          - Ejes rotados: uθ=(cosθ,sinθ) [E'], vθ=(-sinθ,cosθ) [N']
-          - Desplazamientos:
-              * SN' en +E' por 0.6*Distx
-              * WE' en -N' (S') por 0.6*Disty
-          - Construcción como líneas centradas + traslación:
-              * WE = [C - (Lx/2)uθ, C + (Lx/2)uθ] + (0.6*Disty)(-vθ)
-              * SN = [C - (Ly/2)vθ, C + (Ly/2)vθ] + (0.6*Distx)(+uθ)
-        """
-        import math
-
-        with self.connect() as con:
-            cur = con.cursor()
-
-            # SRID y ángulo θ (grados CCW)
-            cur.execute("SELECT srid, COALESCE(section_rotation_deg, 0) FROM albion.metadata")
-            row = cur.fetchone()
-            if not row:
-                return
-            srid, angle_deg = row
-            theta = math.radians(float(angle_deg or 0.0))
-
-            # Extensión 2D de collar
-            cur.execute("""
-                SELECT MIN(ST_X(geom)) AS xmin,
-                       MIN(ST_Y(geom)) AS ymin,
-                       MAX(ST_X(geom)) AS xmax,
-                       MAX(ST_Y(geom)) AS ymax
-                FROM albion.collar
-            """)
-            row = cur.fetchone()
-            if not row or any(v is None for v in row):
-                return
-            xmin, ymin, xmax, ymax = row
-
-            # Centro y distancias base (no escaladas)
-            cx = 0.5 * (xmin + xmax)
-            cy = 0.5 * (ymin + ymax)
-            distx = max(xmax - xmin, 1e-9)
-            disty = max(ymax - ymin, 1e-9)
-
-            # Factor de longitud: 1.5 (o 2.0 si hay mucha elongación)
-            elong = max(distx / disty, disty / distx)
-            f = 2.0 if elong > 2.0 else 1.5
-            Lx = f * distx
-            Ly = f * disty
-
-            # Ejes rotados
-            ux, uy = math.cos(theta), math.sin(theta)       # +E'
-            vx, vy = -math.sin(theta), math.cos(theta)      # +N' (S' = -vθ)
-
-            # Líneas centradas
-            we_c1x, we_c1y = cx - 0.5 * Lx * ux, cy - 0.5 * Lx * uy
-            we_c2x, we_c2y = cx + 0.5 * Lx * ux, cy + 0.5 * Lx * uy
-
-            sn_c1x, sn_c1y = cx - 0.5 * Ly * vx, cy - 0.5 * Ly * vy
-            sn_c2x, sn_c2y = cx + 0.5 * Ly * vx, cy + 0.5 * Ly * vy
-
-            # Traslados pedidos
-            t_sn_x, t_sn_y = 0.6 * distx * ux, 0.6 * distx * uy      # SN' en +E'
-            t_we_x, t_we_y = -0.6 * disty * vx, -0.6 * disty * vy    # WE' en S' = -vθ
-
-            # Aplicar traslación
-            we_x1, we_y1 = we_c1x + t_we_x, we_c1y + t_we_y
-            we_x2, we_y2 = we_c2x + t_we_x, we_c2y + t_we_y
-
-            sn_x1, sn_y1 = sn_c1x + t_sn_x, sn_c1y + t_sn_y
-            sn_x2, sn_y2 = sn_c2x + t_sn_x, sn_c2y + t_sn_y
-
-            # Actualizar anchors para todas las escalas existentes (WE x%, SN x%)
-            cur.execute(
-                """
-                UPDATE albion.section
-                   SET anchor = ST_SetSRID(ST_MakeLine(
-                                   ST_MakePoint(%s,%s),
-                                   ST_MakePoint(%s,%s)), %s)
-                 WHERE id LIKE 'WE x%%'
-                """,
-                (we_x1, we_y1, we_x2, we_y2, srid)
-            )
-            cur.execute(
-                """
-                UPDATE albion.section
-                   SET anchor = ST_SetSRID(ST_MakeLine(
-                                   ST_MakePoint(%s,%s),
-                                   ST_MakePoint(%s,%s)), %s)
-                 WHERE id LIKE 'SN x%%'
-                """,
-                (sn_x1, sn_y1, sn_x2, sn_y2, srid)
-            )
-            con.commit()
-
     def create_sections(self):
-        """
-        Re-centra anchors WE/SN si metadata.section_rotation_deg existe,
-        y refresca geometrías derivadas de sección.
-        """
-        # Reposiciona anclas WE/SN si existe la columna (silencioso si no existe)
-        try:
-            with self.connect() as con:
-                cur = con.cursor()
-                cur.execute(
-                    """
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_schema='albion' AND table_name='metadata'
-                      AND column_name='section_rotation_deg'
-                    """
-                )
-                has_rotation = cur.fetchone() is not None
-            if has_rotation:
-                self.recenter_default_sections()
-        except Exception:
-            # No bloqueamos el refresco si falla el recentrado
-            pass
-
-        # Refresca geometrías derivadas
         with self.connect() as con:
             cur = con.cursor()
             cur.execute("REFRESH MATERIALIZED VIEW albion.section_geom")
@@ -1546,86 +1369,67 @@ class Project(object):
         return project
 
     def create_section_view_0_90(self, z_scale):
+        """create default WE and SN section views with magnifications
+
+        we position anchors south and east in order to have the top of
+        the section with a 50m margin from the extent of the holes
         """
-        Crea/actualiza anchors para el 'scale' dado usando la misma lógica que arriba.
-        """
-        import math
 
         with self.connect() as con:
             cur = con.cursor()
-            cur.execute("SELECT srid, COALESCE(section_rotation_deg, 0) FROM albion.metadata")
-            (srid, theta_deg) = cur.fetchone()
-            theta = math.radians(float(theta_deg or 0.0))
-
-            cur.execute("""
-                SELECT MIN(ST_X(geom)) AS xmin,
-                       MIN(ST_Y(geom)) AS ymin,
-                       MAX(ST_X(geom)) AS xmax,
-                       MAX(ST_Y(geom)) AS ymax
-                FROM albion.collar
-            """)
-            row = cur.fetchone()
-            if not row or any(v is None for v in row):
-                raise RuntimeError("No hay datos en albion.collar para construir las secciones.")
-            xmin, ymin, xmax, ymax = row
-
-            cx = 0.5 * (xmin + xmax)
-            cy = 0.5 * (ymin + ymax)
-            distx = max(xmax - xmin, 1e-9)
-            disty = max(ymax - ymin, 1e-9)
-
-            elong = max(distx / disty, disty / distx)
-            f = 2.0 if elong > 2.0 else 1.5
-            Lx = f * distx
-            Ly = f * disty
-
-            ux, uy = math.cos(theta), math.sin(theta)
-            vx, vy = -math.sin(theta), math.cos(theta)
-
-            we_c1x, we_c1y = cx - 0.5 * Lx * ux, cy - 0.5 * Lx * uy
-            we_c2x, we_c2y = cx + 0.5 * Lx * ux, cy + 0.5 * Lx * uy
-
-            sn_c1x, sn_c1y = cx - 0.5 * Ly * vx, cy - 0.5 * Ly * vy
-            sn_c2x, sn_c2y = cx + 0.5 * Ly * vx, cy + 0.5 * Ly * vy
-
-            t_sn_x, t_sn_y = 0.6 * distx * ux, 0.6 * distx * uy
-            t_we_x, t_we_y = -0.6 * disty * vx, -0.6 * disty * vy
-
-            we_x1, we_y1 = we_c1x + t_we_x, we_c1y + t_we_y
-            we_x2, we_y2 = we_c2x + t_we_x, we_c2y + t_we_y
-
-            sn_x1, sn_y1 = sn_c1x + t_sn_x, sn_c1y + t_sn_y
-            sn_x2, sn_y2 = sn_c2x + t_sn_x, sn_c2y + t_sn_y
-
-            # Upsert por id específico del scale
             cur.execute(
                 """
-                INSERT INTO albion.section(id, anchor, scale)
-                VALUES (%s,
-                        ST_SetSRID(ST_MakeLine(
-                            ST_MakePoint(%s,%s), ST_MakePoint(%s,%s)), %s),
-                        %s)
-                ON CONFLICT (id) DO UPDATE
-                    SET anchor = EXCLUDED.anchor,
-                        scale = EXCLUDED.scale
-                """,
-                (f"WE x{z_scale}", we_x1, we_y1, we_x2, we_y2, srid, z_scale)
+                    SELECT st_3dextent(geom)
+                    FROM albion.hole
+                """
             )
+            ext = cur.fetchone()[0] \
+                .replace("BOX3D(", "") \
+                .replace(")", "") \
+                .split(",")
+            ext = [
+                [float(c) for c in ext[0].split()],
+                [float(c) for c in ext[1].split()],
+            ]
+
+            cur.execute("SELECT srid FROM albion.metadata")
+            (srid,) = cur.fetchone()
             cur.execute(
                 """
-                INSERT INTO albion.section(id, anchor, scale)
-                VALUES (%s,
-                        ST_SetSRID(ST_MakeLine(
-                            ST_MakePoint(%s,%s), ST_MakePoint(%s,%s)), %s),
-                        %s)
-                ON CONFLICT (id) DO UPDATE
-                    SET anchor = EXCLUDED.anchor,
-                        scale = EXCLUDED.scale
-                """,
-                (f"SN x{z_scale}", sn_x1, sn_y1, sn_x2, sn_y2, srid, z_scale)
+                    INSERT INTO albion.section(id, anchor, scale)
+                    VALUES(
+                        'SN x{z_scale}',
+                        'SRID={srid};LINESTRING({x} {ybottom}, {x} {ytop})'::geometry,
+                        {z_scale}
+                    )
+                """.format(
+                    z_scale=z_scale,
+                    srid=srid,
+                    x=ext[1][0] + 50 + z_scale * ext[1][2],
+                    ybottom=ext[0][1],
+                    ytop=ext[1][1],
+                )
             )
+
+            cur.execute(
+                """
+                    INSERT INTO albion.section(id, anchor, scale)
+                    VALUES(
+                        'WE x{z_scale}',
+                        'SRID={srid};LINESTRING({xleft} {y}, {xright} {y})'::geometry,
+                        {z_scale}
+                    )
+                """.format(
+                    z_scale=z_scale,
+                    srid=srid,
+                    y=ext[0][1] - 50 - z_scale * ext[1][2],
+                    xleft=ext[0][0],
+                    xright=ext[1][0],
+                )
+            )
+
             con.commit()
-            
+
     def refresh_section_geom(self, table):
         with self.connect() as con:
             cur = con.cursor()

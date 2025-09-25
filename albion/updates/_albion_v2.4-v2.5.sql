@@ -221,7 +221,7 @@ CREATE OR REPLACE TRIGGER named_section_instead_trig
 
 -- commit b70dbd3f - Add max snapping distance in metadata
 ALTER TABLE _albion.metadata
-ADD COLUMN max_snapping_distance real DEFAULT 10
+ADD COLUMN IF NOT EXISTS max_snapping_distance real DEFAULT 10
 ;
 
 CREATE OR REPLACE view albion.metadata
