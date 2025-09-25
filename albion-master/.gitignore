@@ -1,0 +1,10 @@
+famsa*
+__pycache__
+.ipynb_checkpoints
+.famsa
+output
+build
+*.egg-info
+dist
+data
+*~
