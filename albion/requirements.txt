@@ -1,6 +1,0 @@
-gitpython
-dxfwrite
-PyOpenGL
-pyqt5
-psycopg2
-shapely
