@@ -1,0 +1,26 @@
+name: Unzip AlbionV2
+
+on:
+  push:
+    paths:
+      - 'albionV2.zip'
+
+jobs:
+  unzip:
+    permissions:      # <--- AÑADE ESTA LÍNEA
+      contents: write # <--- Y ESTA LÍNEA
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4 # Actualizado a v4, la más reciente
+
+      - name: Unzip albionV2.zip
+        run: |
+          unzip -o albionV2.zip -d ./
+          rm albionV2.zip
+
+      - name: Commit and Push changes
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: 'Descomprimido el archivo albionV2.zip'
+          branch: main
