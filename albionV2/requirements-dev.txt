@@ -1,6 +1,0 @@
-pytest
-black
-flake8
-pylint
-pre-commit
-pytest-dependency
